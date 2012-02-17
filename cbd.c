@@ -15,6 +15,7 @@ GtkWidget *buttonBROWSE,*buttonDL,*buttonFIND,*buttonBATCH;
 GtkWidget *checkREGEX2_ENABLED, *checkREGEX2_REVERSE;
 
 GtkWidget *scrollLIST,*listFILES;
+GtkWidget *gFCD;
 
 enum
 {
@@ -52,20 +53,39 @@ add_to_list(GtkWidget *list, const gchar *str)
 	gtk_list_store_set(store, &iter, LIST_ITEM, str, -1);
 }
 
+void browse (GtkWidget *widget, char *dir)
+{
+	int i=0;
+	char c[1];
+	do{
+		sprintf(c,"%.*s",1,&dir[strlen(dir)-i]);
+		i++;
+	}while(strcmp(c,"/")!=0);
+	sprintf(dir,"%.*s",strlen(dir)-i+2,&dir[0]);
+	gFCD = gtk_file_chooser_dialog_new("选择一个文件", GTK_WINDOW(window), GTK_FILE_CHOOSER_ACTION_OPEN, GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL, GTK_STOCK_OPEN, GTK_RESPONSE_ACCEPT, NULL);
+	if (gtk_dialog_run(GTK_DIALOG(gFCD))==GTK_RESPONSE_ACCEPT) {
+		char *filename, check[strlen(dir)];
+		filename=gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(gFCD));
+		sprintf(check,"%.*s",strlen(dir),&filename[0]);
+		if(strcmp(check,dir)==0)sprintf(filename,"%s",&filename[strlen(dir)]);
+		gtk_entry_set_text(GTK_ENTRY(entrySRC), filename);
+	}
+	gtk_widget_destroy (gFCD);
+	
+}
+
 void find (GtkWidget *widget, gpointer window)
 {
+	items_found=0;
+	gtk_list_store_clear(GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW (listFILES))));
+
 	FILE *pFILE;
-	
 	pFILE=fopen(gtk_entry_get_text(GTK_ENTRY(entrySRC)),"r");
 	if (pFILE!=NULL) {
 		fseek(pFILE, 0L, SEEK_END);
 		int sz = ftell(pFILE);
 		char str[sz];
 		fseek(pFILE, 0L, SEEK_SET);
-		items_found=0;
-		
-		gtk_list_store_clear(GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW (listFILES))));
-		
 		while (fgets(str, sz, pFILE) != NULL) {
 			const char *error;
 			int erroffset, rc, rc2, i, ovector[100], ovector2[100];
@@ -98,7 +118,7 @@ void find (GtkWidget *widget, gpointer window)
 			} else {
 				unsigned int offset = 0, len = strlen(str);
 				while (offset < len && (rc = pcre_exec(re, 0, str, len, offset, 0, ovector, sizeof(ovector))) >= 0) {
-					for(i = 0; i < rc; ++i) {
+					for(i = 0; i < rc-1; ++i) {
 						int length = ovector[2*i+1]-ovector[2*i];
 						char buffer[length];
 						sprintf(buffer, "%.*s", length, str + ovector[2*i]);
@@ -117,16 +137,16 @@ void find (GtkWidget *widget, gpointer window)
 			}
 	   	}
 		fclose(pFILE);
-		char status[50];
-		sprintf(status, "找到%d个项目。", items_found);
-		gtk_label_set_text(GTK_LABEL(labelREALSTATUS), status);
 	} else {
 		GtkWidget *dialog;
-		dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "找不到输入文件。");
+		dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "无法打开输入文件。");
 		gtk_window_set_title(GTK_WINDOW(dialog), "错误");
 		gtk_dialog_run(GTK_DIALOG(dialog));
 		gtk_widget_destroy(dialog);
 	}
+	char status[50];
+	sprintf(status, "找到%d个项目。", items_found);
+	gtk_label_set_text(GTK_LABEL(labelREALSTATUS), status);
 }
 
 void chkREGEX2(){
@@ -149,7 +169,7 @@ int main (int argc, char *argv[])
 	gtk_window_set_type_hint(GTK_WINDOW(window), GDK_WINDOW_TYPE_HINT_DIALOG);
 	gtk_container_set_border_width(GTK_CONTAINER(window), 10);
 	GError *err = NULL;
-	gtk_window_set_icon_from_file(GTK_WINDOW(window), "download.png", &err);
+	gtk_window_set_icon_from_file(GTK_WINDOW(window), "resources/download.png", &err);
 
 	labelSRC = gtk_label_new("来源:");
 	labelFIND = gtk_label_new("查找:");
@@ -159,7 +179,12 @@ int main (int argc, char *argv[])
 	gtk_misc_set_alignment(GTK_MISC(labelREALSTATUS),0.0,0.5);
 	
 	entrySRC = gtk_entry_new();
-	gtk_entry_set_text(GTK_ENTRY(entrySRC), "starred-items-jas.json");
+	if (argv[1]) {
+		gtk_entry_set_text(GTK_ENTRY(entrySRC), argv[1]);
+	}else{
+		gtk_entry_set_text(GTK_ENTRY(entrySRC), "resources/test");
+	}
+	
 	gtk_widget_set_size_request(entrySRC, 300, 30);
 	
 	buttonBROWSE = gtk_button_new_with_label("浏览...");
@@ -172,11 +197,13 @@ int main (int argc, char *argv[])
 	gtk_entry_set_text(GTK_ENTRY(entryREGEX), "(http\\:\\/\\/[a-zA-Z0-9\\-\\.]+\\.[a-zA-Z]{2,3}(?:\\/\\S*)?(?:[a-zA-Z0-9_])+\\.(?:jpg|jpeg|gif|png))");
 	
 	checkREGEX2_ENABLED = gtk_check_button_new_with_label("启用筛选");
-	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(checkREGEX2_ENABLED), TRUE);
+	//gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(checkREGEX2_ENABLED), TRUE);
 	checkREGEX2_REVERSE = gtk_check_button_new_with_label("反筛选");
+	gtk_widget_set_sensitive(checkREGEX2_REVERSE, FALSE);
 	entryREGEX2 = gtk_entry_new();
 	gtk_entry_set_text(GTK_ENTRY(entryREGEX2), "tumblr");
 	gtk_widget_set_size_request(entryREGEX2, 100, 30);
+	gtk_widget_set_sensitive(entryREGEX2, FALSE);
 	
 	buttonFIND = gtk_button_new_with_label("查找");
 	gtk_widget_set_size_request(buttonFIND, 80, 30);
@@ -213,6 +240,7 @@ int main (int argc, char *argv[])
 	
 	gtk_table_attach(GTK_TABLE(table), scrollLIST, 0, 4, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 5);
 
+	g_signal_connect(G_OBJECT(buttonBROWSE), "clicked", G_CALLBACK(browse), argv[0]);
 	g_signal_connect(G_OBJECT(buttonFIND), "clicked", G_CALLBACK(find), (gpointer) window);
 	g_signal_connect(G_OBJECT(checkREGEX2_ENABLED), "clicked", G_CALLBACK(chkREGEX2), NULL);
 	g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
