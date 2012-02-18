@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <gtk/gtk.h>
+#include <curl/curl.h>
 #include <stdlib.h>
 #include <pcre.h>
+#include <ctype.h>
 
 int items_found = 0;
 
@@ -57,10 +59,10 @@ void browse (GtkWidget *widget, char *dir)
 {
 	int i=0;
 	char c[1];
-	do{
+	do {
 		sprintf(c,"%.*s",1,&dir[strlen(dir)-i]);
 		i++;
-	}while(strcmp(c,"/")!=0);
+	} while(strcmp(c,"/")!=0);
 	sprintf(dir,"%.*s",strlen(dir)-i+2,&dir[0]);
 	gFCD = gtk_file_chooser_dialog_new("选择一个文件", GTK_WINDOW(window), GTK_FILE_CHOOSER_ACTION_OPEN, GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL, GTK_STOCK_OPEN, GTK_RESPONSE_ACCEPT, NULL);
 	if (gtk_dialog_run(GTK_DIALOG(gFCD))==GTK_RESPONSE_ACCEPT) {
@@ -102,7 +104,7 @@ void find (GtkWidget *widget, gpointer window)
 					gtk_dialog_run(GTK_DIALOG(dialog));
 					gtk_widget_destroy(dialog);
 					break;
-				}else{
+				} else {
 					filter_enabled=1;
 					if(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(checkREGEX2_REVERSE)))filter_enabled=2;
 				}
@@ -147,16 +149,142 @@ void find (GtkWidget *widget, gpointer window)
 	char status[50];
 	sprintf(status, "找到%d个项目。", items_found);
 	gtk_label_set_text(GTK_LABEL(labelREALSTATUS), status);
+	gtk_widget_set_sensitive(buttonBATCH, items_found);
 }
 
-void chkREGEX2(){
+size_t write_data(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+    size_t written;
+    written = fwrite(ptr, size, nmemb, stream);
+    return written;
+}
+
+void batchsensitive (gboolean sensitive) {
+	gtk_widget_set_sensitive(entryREGEX, sensitive);
+	gtk_widget_set_sensitive(entryREGEX2, sensitive);
+	gtk_widget_set_sensitive(entrySRC, sensitive);
+	gtk_widget_set_sensitive(checkREGEX2_ENABLED, sensitive);
+	gtk_widget_set_sensitive(checkREGEX2_REVERSE, sensitive);
+	gtk_widget_set_sensitive(buttonBROWSE, sensitive);
+	gtk_widget_set_sensitive(buttonDL, sensitive);
+	gtk_widget_set_sensitive(buttonFIND, sensitive);
+	gtk_widget_set_sensitive(buttonBATCH, sensitive);
+}
+
+/* URL_DECODE START
+ * From: http://www.geekhideout.com/urlcode.shtml */
+char *url_decode(char *str) {
+	char *pstr = str, *buf = malloc(strlen(str) + 1), *pbuf = buf;
+	while (*pstr) {
+		if (*pstr == '%') {
+			if (pstr[1] && pstr[2]) {
+				*pbuf++ = (isdigit(pstr[1]) ? pstr[1] - '0' : tolower(pstr[1]) - 'a' + 10) << 4 | (isdigit(pstr[2]) ? pstr[2] - '0' : tolower(pstr[2]) - 'a' + 10);
+				pstr += 2;
+			}
+		} else if (*pstr == '+') {
+			*pbuf++ = ' ';
+		} else {
+			*pbuf++ = *pstr;
+		}
+		pstr++;
+	}
+	*pbuf = '\0';
+	return buf;
+}
+/* URL_DECODE END */
+
+void download() {
+	gtk_label_set_text(GTK_LABEL(labelREALSTATUS), "正在下载...");
+	batchsensitive(FALSE);
+	
+	CURLM *multi_handle;
+	CURL *http_handle[items_found];
+	int still_running;
+	multi_handle = curl_multi_init();
+	
+	GtkTreeModel *model;
+	GtkTreeIter iter;
+	gboolean valid;
+	model = gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES));
+	valid = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(model), &iter);
+	
+	int i=0;
+	
+	while(valid) {
+		gchar *value;
+		gtk_tree_model_get(model, &iter, LIST_ITEM, &value, -1);
+		//printf("%s\n", value);
+		valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(model), &iter);
+		
+		int j=0;
+		char filename[255],c[1];
+		do {
+			sprintf(c,"%.*s",1,&value[strlen(value)-j]);
+			j++;
+		} while(strcmp(c,"/")!=0);
+		sprintf(filename,"%s/%s","downloads",url_decode(&value[strlen(value)-j+2]));
+		
+		http_handle[i] = curl_easy_init();
+		curl_easy_setopt(http_handle[i], CURLOPT_URL, value);
+		curl_easy_setopt(http_handle[i], CURLOPT_WRITEFUNCTION, write_data);
+		curl_easy_setopt(http_handle[i], CURLOPT_WRITEDATA, fopen(filename,"wb"));
+		curl_easy_setopt(http_handle[i], CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+		curl_multi_add_handle(multi_handle, http_handle[i]);
+		
+		i++;
+	}
+	curl_multi_perform(multi_handle, &still_running);
+
+	while(still_running) {
+		struct timeval timeout;
+		int rc;
+
+		fd_set fdread;
+		fd_set fdwrite;
+		fd_set fdexcep;
+		int maxfd = -1;
+
+		long curl_timeo = -1;
+
+		FD_ZERO(&fdread);
+		FD_ZERO(&fdwrite);
+		FD_ZERO(&fdexcep);
+
+		timeout.tv_sec = 1;
+		timeout.tv_usec = 0;
+
+		curl_multi_timeout(multi_handle, &curl_timeo);
+		if(curl_timeo >= 0) {
+			timeout.tv_sec = curl_timeo / 1000;
+			if(timeout.tv_sec > 1)
+				timeout.tv_sec = 1;
+			else
+				timeout.tv_usec = (curl_timeo % 1000) * 1000;
+			}
+
+		curl_multi_fdset(multi_handle, &fdread, &fdwrite, &fdexcep, &maxfd);
+
+		rc = select(maxfd+1, &fdread, &fdwrite, &fdexcep, &timeout);
+
+		switch(rc) {
+			case -1:
+				break;
+			case 0:
+			default:
+				curl_multi_perform(multi_handle, &still_running);
+				break;
+		}
+	}
+	gtk_label_set_text(GTK_LABEL(labelREALSTATUS), "下载完成。");
+	batchsensitive(TRUE);
+}
+
+void chkREGEX2() {
 	gboolean chked=gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(checkREGEX2_ENABLED));
 	gtk_widget_set_sensitive(checkREGEX2_REVERSE, chked);
 	gtk_widget_set_sensitive(entryREGEX2, chked);
 }
 
-int main (int argc, char *argv[])
-{
+int main (int argc, char *argv[]) {
 	gtk_init(&argc, &argv);
 
 	window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -181,7 +309,7 @@ int main (int argc, char *argv[])
 	entrySRC = gtk_entry_new();
 	if (argv[1]) {
 		gtk_entry_set_text(GTK_ENTRY(entrySRC), argv[1]);
-	}else{
+	} else {
 		gtk_entry_set_text(GTK_ENTRY(entrySRC), "resources/test");
 	}
 	
@@ -242,6 +370,7 @@ int main (int argc, char *argv[])
 
 	g_signal_connect(G_OBJECT(buttonBROWSE), "clicked", G_CALLBACK(browse), argv[0]);
 	g_signal_connect(G_OBJECT(buttonFIND), "clicked", G_CALLBACK(find), (gpointer) window);
+	g_signal_connect(G_OBJECT(buttonBATCH), "clicked", G_CALLBACK(download), (gpointer) window);
 	g_signal_connect(G_OBJECT(checkREGEX2_ENABLED), "clicked", G_CALLBACK(chkREGEX2), NULL);
 	g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
 
