@@ -6,24 +6,32 @@
 #include <pcre.h>
 #include <ctype.h>
 #include <pthread.h>
+#ifdef _WIN32
+#include <gdk/gdkwin32.h>
+#endif
 
 int items_found = 0, items_to_dl = 0;
+int dldone=-1;
+int dl_simul = 5;
+gboolean dling = FALSE;
 
 GtkWidget *window;
 GtkWidget *table;
 
-GtkWidget *labelSRC,*labelFIND,*labelFILTER,*labelSTATUS,*labelREALSTATUS;
+GtkWidget *labelSRC,*labelFIND,*labelFILTER,*labelSTATUS,*labelREALSTATUS,*labelAUTHOR;
 GtkWidget *entrySRC,*entryREGEX,*entryREGEX2;
-GtkWidget *buttonBROWSE,*buttonDL,*buttonFIND,*buttonBATCH;
+GtkWidget *buttonBROWSE,*buttonDL,*buttonFIND,*buttonBATCH,*buttonSTOP;
 GtkWidget *checkREGEX2_ENABLED, *checkREGEX2_REVERSE;
 
 GtkWidget *scrollLIST,*listFILES;
 GtkWidget *gFCD;
+GtkWidget *menu, *miVIEW, *miCOPY, *miDEL, *miCLEAR;
+
+GtkAccelGroup *accel_group;
 
 pthread_t thread_download;
 
-enum
-{
+enum {
 	FILENAME,
 	PATH,
 	PROGRESS_TEXT,
@@ -31,8 +39,7 @@ enum
 	N_COLUMNS
 };
 
-static void init_list(GtkWidget *list)
-{
+static void init_list (GtkWidget *list) {
 	GtkCellRenderer *renderer;
 	GtkTreeViewColumn *column;
 	GtkListStore *store;
@@ -61,8 +68,7 @@ static void init_list(GtkWidget *list)
 	g_object_unref(store);
 }
 
-static void add_to_list(GtkWidget *list, gchar *progt, int prog, gchar *path, gchar *str)
-{
+static void add_to_list (GtkWidget *list, gchar *progt, int prog, gchar *path, gchar *str) {
 	GtkListStore *store;
 	GtkTreeIter iter;
 
@@ -74,6 +80,21 @@ static void add_to_list(GtkWidget *list, gchar *progt, int prog, gchar *path, gc
 
 /* URL_DECODE START
  * From: http://www.geekhideout.com/urlcode.shtml */
+char *url_encode (char *str) {
+	static char hex[] = "0123456789ABCDEF";
+	char *pstr = str, *buf = malloc(strlen(str) * 3 + 1), *pbuf = buf;
+	while (*pstr) {
+		if (isalnum(*pstr) || *pstr == '-' || *pstr == '_' || *pstr == '.' || *pstr == '~') 
+			*pbuf++ = *pstr;
+		else if (*pstr == ' ') 
+			*pbuf++ = '+';
+		else 
+			*pbuf++ = '%', *pbuf++ = hex[(*pstr >> 4) & 15], *pbuf++ = hex[(*pstr & 15) & 15];
+		pstr++;
+	}
+	*pbuf = '\0';
+	return buf;
+}
 char *url_decode (const char *str) {
 	char *pstr = (char *)str, *buf = malloc(strlen(str) + 1), *pbuf = buf;
 	while (*pstr) {
@@ -94,7 +115,7 @@ char *url_decode (const char *str) {
 }
 /* URL_DECODE END */
 
-int last_slash(char *location){
+int last_slash (char *location) {
 	int i=0;
 	char c[1];
 	do {
@@ -104,29 +125,25 @@ int last_slash(char *location){
 	return i;
 }
 
-char *get_path (char *location)
-{
+char *get_path (char *location) {
 	char *path=malloc((strlen(location)+1)*sizeof(char));
 	sprintf(path,"%.*s",strlen(location)-last_slash(location)+2,&location[0]);
 	return path;
 }
 
-char *get_file_name (char *location)
-{
+char *get_file_name (char *location) {
 	char *filename=malloc((strlen(location)+1)*sizeof(char));
 	sprintf(filename,"%s",url_decode(&location[strlen(location)-last_slash(location)+2]));
 	return filename;
 }
 
-char *location_to_save (char *path)
-{
+char *location_to_save (char *path) {
 	char *lts=malloc((strlen(path)+1)*sizeof(char));
 	sprintf(lts,"%s%s","downloads/",get_file_name(path));
 	return lts;
 }
 
-void browse (GtkWidget *widget, char *dir)
-{
+void browse (GtkWidget *widget, char *dir) {
 	int i=0;
 	char c[1];
 	do {
@@ -146,8 +163,7 @@ void browse (GtkWidget *widget, char *dir)
 	
 }
 
-void warn (gchar *title, gchar *content)
-{
+void warn (gchar *title, gchar *content) {
 	GtkWidget *dialog;
 	dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, NULL);
 	gtk_message_dialog_set_markup(GTK_MESSAGE_DIALOG(dialog), content);
@@ -156,11 +172,21 @@ void warn (gchar *title, gchar *content)
 	gtk_widget_destroy(dialog);
 }
 
-void find (GtkWidget *widget, gpointer window)
-{
+void update_status() {
+	char status[50];
+	sprintf(status, "找到%d/%d个项目可供下载。", items_to_dl, items_found);
+	gtk_label_set_text(GTK_LABEL(labelREALSTATUS), status);
+}
+
+void clearlist() {
 	items_found=0;
 	items_to_dl=0;
-	gtk_list_store_clear(GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW (listFILES))));
+	gtk_list_store_clear(GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES))));
+	update_status();
+}
+
+void find (GtkWidget *widget, gpointer window) {
+	clearlist();
 
 	FILE *pFILE;
 	pFILE=fopen(gtk_entry_get_text(GTK_ENTRY(entrySRC)),"r");
@@ -179,11 +205,7 @@ void find (GtkWidget *widget, gpointer window)
 			int filter_enabled=0;
 			if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(checkREGEX2_ENABLED))) {
 				if ((re2 = pcre_compile (regex2, 0, &error, &erroffset, 0))==NULL) {
-					GtkWidget *dialog;
-					dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "筛选：错误的正则表达式。");
-					gtk_window_set_title(GTK_WINDOW(dialog), "错误");
-					gtk_dialog_run(GTK_DIALOG(dialog));
-					gtk_widget_destroy(dialog);
+					warn("错误","筛选：错误的正则表达式。");
 					break;
 				} else {
 					filter_enabled=1;
@@ -192,11 +214,7 @@ void find (GtkWidget *widget, gpointer window)
 			}
 			
 			if ((re = pcre_compile (regex, 0, &error, &erroffset, 0))==NULL) {
-				GtkWidget *dialog;
-				dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "查找：错误的正则表达式。");
-				gtk_window_set_title(GTK_WINDOW(dialog), "错误");
-				gtk_dialog_run(GTK_DIALOG(dialog));
-				gtk_widget_destroy(dialog);
+				warn("错误","查找：错误的正则表达式。");
 				break;
 			} else {
 				unsigned int offset = 0, len = strlen(str);
@@ -219,7 +237,7 @@ void find (GtkWidget *widget, gpointer window)
 							add_to_list(listFILES, "准备", 0, get_path(buffer), get_file_name(buffer));
 							items_to_dl+=1;
 						}
-						
+						file = NULL;
 						items_found+=1;
 						
 					}
@@ -229,15 +247,10 @@ void find (GtkWidget *widget, gpointer window)
 	   	}
 		fclose(pFILE);
 	} else {
-		GtkWidget *dialog;
-		dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK, "无法打开输入文件。");
-		gtk_window_set_title(GTK_WINDOW(dialog), "错误");
-		gtk_dialog_run(GTK_DIALOG(dialog));
-		gtk_widget_destroy(dialog);
+		warn("错误","无法打开输入文件。");
 	}
-	char status[50];
-	sprintf(status, "找到%d/%d个项目可供下载。", items_to_dl, items_found);
-	gtk_label_set_text(GTK_LABEL(labelREALSTATUS), status);
+	pFILE = NULL;
+	update_status();
 	gtk_widget_set_sensitive(buttonBATCH, items_to_dl);
 }
 
@@ -245,7 +258,7 @@ size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream) {
 	return fwrite(ptr, size, nmemb, stream);
 }
 
-void chkREGEX2() {
+void chkREGEX2 () {
 	gboolean chked=gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(checkREGEX2_ENABLED));
 	gtk_widget_set_sensitive(checkREGEX2_REVERSE, chked);
 	gtk_widget_set_sensitive(entryREGEX2, chked);
@@ -260,36 +273,48 @@ void batchsensitive (gboolean sensitive) {
 	gtk_widget_set_sensitive(buttonBROWSE, sensitive);
 	gtk_widget_set_sensitive(buttonDL, sensitive);
 	gtk_widget_set_sensitive(buttonFIND, sensitive);
-	gtk_widget_set_sensitive(buttonBATCH, sensitive);
+	gtk_widget_set_visible(buttonBATCH, sensitive);
+	gtk_widget_set_visible(buttonSTOP, !sensitive);
+	gtk_widget_set_sensitive(miDEL, sensitive);
+	gtk_widget_set_sensitive(miCLEAR, sensitive);
 	if(sensitive)chkREGEX2();
 }
 
-static int progress(gchar *pathstring, double dltotal, double dlnow, double ultotal, double ulnow)
-{
+struct pro {
+	gchar *pathstring;
+	int index;
+};
+
+static int progress (void *p, double dltotal, double dlnow, double ultotal, double ulnow) {
 	gdk_threads_enter();
-	
+	struct pro *prog = (struct pro *)p;
 	int done=0;
 	if(dlnow!=0&&dltotal!=0)done=(int)dlnow/dltotal*100;
 	GtkTreeModel *model;
 	GtkTreeIter iter;
 	model = gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES));
-	gtk_tree_model_get_iter_from_string(model, &iter, pathstring);
+	gtk_tree_model_get_iter_from_string(model, &iter, prog->pathstring);
 	char pt[10];
 	sprintf(pt, "%d%%", done);
+	gint *progcc;
+	gtk_tree_model_get(model, &iter, PROGRESS, &progcc, -1);
 	gtk_list_store_set(GTK_LIST_STORE(model), &iter, PROGRESS_TEXT, pt, PROGRESS, done, -1);
-	
+	if ((int)progcc!=(int)100 && done==100) {
+		items_to_dl-=1;
+		update_status();
+		dldone=prog->index;
+	}
 	gdk_threads_leave();
 	return 0;
 }
 
-int dl_simul = 5;
-
-void *download(void *p) {
+void *download (void *p) {
 	
 	CURLM *multi_handle;
 	CURL *http_handle[dl_simul-1];
 	FILE *fp[dl_simul-1];
 	int still_running;
+	struct pro prog[dl_simul-1];
 	
 	curl_global_init(CURL_GLOBAL_ALL);
 	multi_handle = curl_multi_init();
@@ -301,12 +326,17 @@ void *download(void *p) {
 	valid = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(model), &iter);
 	
 	int i=0;
+	int useindex=-1;
 	
-	while (valid && i<dl_simul) {
+	start:
+	
+	while (valid && (i<dl_simul || useindex>-1)) {
 		gint *progcc;
 		gtk_tree_model_get(model, &iter, PROGRESS, &progcc, -1);
 		
 		if((int)progcc!=(int)100){
+			if (useindex==-1) useindex=i;
+			
 			gchar *location, *filename;
 			gtk_tree_model_get(model, &iter, PATH, &location, -1);
 			gtk_tree_model_get(model, &iter, FILENAME, &filename, -1);
@@ -315,27 +345,35 @@ void *download(void *p) {
 			strcpy(urlss,location);
 			strcat(urlss,filename);
 			
-			fp[i]=fopen(location_to_save(urlss),"wb");
+			prog[useindex].pathstring = gtk_tree_model_get_string_from_iter(model, &iter);
+			prog[useindex].index = useindex;
 			
-			http_handle[i] = curl_easy_init();
-			curl_easy_setopt(http_handle[i], CURLOPT_URL, urlss);
-			curl_easy_setopt(http_handle[i], CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-			curl_easy_setopt(http_handle[i], CURLOPT_WRITEFUNCTION, write_data);
-			curl_easy_setopt(http_handle[i], CURLOPT_WRITEDATA, fp[i]);
-			curl_easy_setopt(http_handle[i], CURLOPT_NOPROGRESS, 0);
-			curl_easy_setopt(http_handle[i], CURLOPT_PROGRESSFUNCTION, progress);
-			curl_easy_setopt(http_handle[i], CURLOPT_PROGRESSDATA, gtk_tree_model_get_string_from_iter(model, &iter));
-			curl_multi_add_handle(multi_handle, http_handle[i]);
+			fp[useindex]=fopen(location_to_save(urlss),"wb");
+			
+			http_handle[useindex] = curl_easy_init();
+			curl_easy_setopt(http_handle[useindex], CURLOPT_URL, urlss);
+			curl_easy_setopt(http_handle[useindex], CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+			curl_easy_setopt(http_handle[useindex], CURLOPT_WRITEFUNCTION, write_data);
+			curl_easy_setopt(http_handle[useindex], CURLOPT_WRITEDATA, fp[useindex]);
+			curl_easy_setopt(http_handle[useindex], CURLOPT_NOPROGRESS, 0);
+			curl_easy_setopt(http_handle[useindex], CURLOPT_PROGRESSFUNCTION, progress);
+			curl_easy_setopt(http_handle[useindex], CURLOPT_PROGRESSDATA, &prog[useindex]);
+			curl_multi_add_handle(multi_handle, http_handle[useindex]);
 			i++;
-			items_to_dl-=1;
+			useindex=-1;
+			
+			free(urlss);
+			free(location);
+			free(filename);
 		}
 		
 		valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(model), &iter);
 	}
 	if (i>0) {
+		dling = TRUE;
 		curl_multi_perform(multi_handle, &still_running);
 
-		while(still_running) {
+		while (still_running) {
 			struct timeval timeout;
 			int rc;
 
@@ -374,50 +412,163 @@ void *download(void *p) {
 					curl_multi_perform(multi_handle, &still_running);
 					break;
 			}
+			
+			if (!dling) break;
+			
+			if (still_running<i && dldone>-1) {
+				printf("完成第%d/%d个下载\n",dldone+1,dl_simul);
+				if (fp[dldone]) {
+					fclose(fp[dldone]);
+				}
+				fp[dldone]=NULL;
+				if (http_handle[dldone]) {
+					curl_multi_remove_handle(multi_handle, http_handle[dldone]);
+					curl_easy_cleanup(http_handle[dldone]);
+				}
+				http_handle[dldone]=NULL;
+				if (items_to_dl>0) {
+					useindex=dldone;
+					dldone=-1;
+					i-=1;
+					goto start;
+				} else {
+					dldone=-1;
+				}
+				
+			}
+
 		}
-	}
-	int j=0;
-	for(;j<i;j++){
-		if (fp[j]) fclose(fp[j]);
-		curl_multi_remove_handle(multi_handle, http_handle[j]);
-		curl_easy_cleanup(http_handle[j]);
 	}
 	curl_multi_cleanup(multi_handle);
 	curl_global_cleanup();
-	if (items_to_dl>0) {
-		return download(NULL);
-	} else {
-		gtk_label_set_text(GTK_LABEL(labelREALSTATUS), "下载完成。");
-		batchsensitive(TRUE);
-		pthread_exit(NULL);
-		return NULL;
-	}
+	gtk_label_set_text(GTK_LABEL(labelREALSTATUS), "下载完成。");
+	batchsensitive(TRUE);
+	pthread_exit(NULL);
+	return NULL;
 }
 
-void download_click() {
-	/*GtkTreeModel *model;
-	GtkTreeIter iter;
-	gboolean valid;
-	model = gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES));
-	valid = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(model), &iter);
-	int count=0;
-	while (valid) {
-		gint *progcc;
-		gtk_tree_model_get(model, &iter, PROGRESS, &progcc, -1);
-		if((int)progcc!=(int)100){
-			count+=1;
-		}
-		valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(model), &iter);
-	}
-	*/
+void download_click () {
 	if (items_to_dl==0) {
 		warn("错误","找不到项目可以下载。");
 	} else {
 		gtk_label_set_text(GTK_LABEL(labelREALSTATUS), "正在下载...");
+		gtk_widget_set_sensitive(buttonBATCH, FALSE);
+		gtk_widget_set_sensitive(buttonSTOP, TRUE);
 		batchsensitive(FALSE);
-		
 		pthread_create(&thread_download, NULL, download, NULL);
 	}
+}
+
+void stop_download () {
+	gtk_widget_set_sensitive(buttonBATCH, TRUE);
+	gtk_widget_set_sensitive(buttonSTOP, FALSE);
+	dldone = -1;
+	dling = FALSE;
+}
+
+gboolean key_press(GtkWindow *win, GdkEventKey *event, gpointer user_data) {
+	if (!GTK_IS_ENTRY(gtk_window_get_focus(GTK_WINDOW(win))) && event->keyval == 0xff1b ) { //ESC
+		gtk_main_quit();
+	} else if (gtk_window_get_focus(GTK_WINDOW(win))) {
+		if (event->keyval == 0xffff || //DELETE
+		((event->state & GDK_CONTROL_MASK) && (
+			event->keyval == 0x06f || //CTRL+O
+			event->keyval == 0x063 || //CTRL+C
+			event->keyval == 0xffff //CTRL+DELETE
+			))
+		) {
+		return gtk_widget_event(gtk_window_get_focus(GTK_WINDOW(win)), (GdkEvent *)event);
+		}
+	}
+	return FALSE;
+}
+
+void deleteurl(GtkWindow *win, GdkEventKey *event, gpointer user_data) {
+	GtkTreeModel *model;
+	GtkTreeIter iter;
+	model = gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES));
+	if (gtk_tree_selection_get_selected(gtk_tree_view_get_selection(GTK_TREE_VIEW(listFILES)), &model, &iter)) {
+		gint *progcc;
+		gtk_tree_model_get(model, &iter, PROGRESS, &progcc, -1);
+		items_found-=1;
+		if((int)progcc!=(int)100){
+			items_to_dl-=1;
+		}
+		if (items_found>0) {
+			GtkTreePath *path;
+			path = gtk_tree_model_get_path(model, &iter);
+			if (gtk_tree_path_prev(path)) {
+				GtkTreeIter prev_iter;
+				gtk_tree_model_get_iter(model, &prev_iter, path);
+				gtk_tree_selection_select_iter(gtk_tree_view_get_selection(GTK_TREE_VIEW(listFILES)), &prev_iter);
+			}
+		}
+		gtk_list_store_remove(GTK_LIST_STORE(model), &iter);
+		if (gtk_list_store_iter_is_valid(GTK_LIST_STORE(model), &iter)) {
+			gtk_tree_selection_select_iter(gtk_tree_view_get_selection(GTK_TREE_VIEW(listFILES)), &iter);
+		}
+		update_status();
+	}
+}
+
+void openurl() {
+	GtkTreeModel *model;
+	GtkTreeIter iter;
+	model = gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES));
+	if (gtk_tree_selection_get_selected(gtk_tree_view_get_selection(GTK_TREE_VIEW(listFILES)), &model, &iter)) {
+		gchar *location, *filename;
+		gtk_tree_model_get(model, &iter, PATH, &location, -1);
+		gtk_tree_model_get(model, &iter, FILENAME, &filename, -1);
+		filename=url_encode(filename);
+		char *url=malloc(strlen(location)+strlen(filename)+1);
+		strcpy(url,location);
+		strcat(url,filename);
+		#if defined(_WIN32)
+			ShellExecute(NULL, "open", url, NULL, NULL, SW_SHOW) > 32;
+		#elif defined(MACOSX)
+			GError* error = NULL;
+			const gchar *argv[] = {"open", (gchar*) url, NULL};
+			g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error);
+		#else
+			GError* error = NULL;
+			gchar *argv[] = {"xdg-open", (gchar*) url, NULL};
+			g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error);
+		#endif
+		free(filename);
+		free(url);
+		free(location);
+	}
+}
+
+void copyurl () {
+	GtkTreeModel *model;
+	GtkTreeIter iter;
+	model = gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES));
+	if (gtk_tree_selection_get_selected(gtk_tree_view_get_selection(GTK_TREE_VIEW(listFILES)), &model, &iter)) {
+		gchar *location, *filename;
+		gtk_tree_model_get(model, &iter, PATH, &location, -1);
+		gtk_tree_model_get(model, &iter, FILENAME, &filename, -1);
+		filename=url_encode(filename);
+		char *urlss=malloc(strlen(location)+strlen(filename)+1);
+		strcpy(urlss,location);
+		strcat(urlss,filename);
+		gtk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(listFILES), GDK_SELECTION_CLIPBOARD), urlss, -1);
+		free(urlss);
+		free(filename);
+		free(location);
+	}
+}
+
+gboolean list_popup (void *p, GdkEventButton *event, gpointer userdata) {
+	if (event->type == GDK_BUTTON_PRESS  &&  event->button == 3) {
+		gtk_widget_set_sensitive(miVIEW, items_found);
+		gtk_widget_set_sensitive(miCOPY, items_found);
+		gtk_widget_set_sensitive(miDEL, items_found);
+		gtk_widget_set_sensitive(miCLEAR, items_found);		
+		g_object_ref((gpointer)menu);
+		gtk_menu_popup(GTK_MENU(menu), NULL, NULL, NULL, NULL, 3, GDK_CURRENT_TIME);
+	}
+	return FALSE;
 }
 
 int main (int argc, char *argv[]) {
@@ -428,7 +579,7 @@ int main (int argc, char *argv[]) {
 
 	window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	
-	table = gtk_table_new(5, 4, FALSE);
+	table = gtk_table_new(6, 4, FALSE);
 	gtk_container_add(GTK_CONTAINER(window), table);
 
 	gtk_window_set_title(GTK_WINDOW(window), "cBatchDownload");
@@ -480,14 +631,50 @@ int main (int argc, char *argv[]) {
 	gtk_widget_set_size_request(buttonBATCH, 80, 30);
 	gtk_widget_set_sensitive(buttonBATCH, FALSE);
 	
+	buttonSTOP = gtk_button_new_with_label("停止");
+	gtk_widget_set_size_request(buttonSTOP, 80, 30);
+	gtk_widget_set_sensitive(buttonSTOP, TRUE);
+	gtk_widget_set_visible(buttonSTOP, FALSE);
+	
 	listFILES = gtk_tree_view_new();
 	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(listFILES), FALSE);
 	init_list(listFILES);
+	
+	accel_group = gtk_accel_group_new();
+	gtk_window_add_accel_group(GTK_WINDOW(window), accel_group);
+	menu = gtk_menu_new();
+	
+	miVIEW = gtk_image_menu_item_new_from_stock(GTK_STOCK_NETWORK, NULL);
+	gtk_label_set_markup(GTK_LABEL(GTK_BIN(miVIEW)->child), "<b>在默认浏览器中查看</b>");
+	gtk_widget_add_accelerator(miVIEW, "activate", accel_group, 0x06f, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
+	gtk_menu_shell_append(GTK_MENU_SHELL(menu), miVIEW);
+	gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+	
+	miCOPY = gtk_image_menu_item_new_from_stock(GTK_STOCK_COPY, NULL);
+	gtk_menu_item_set_label(GTK_MENU_ITEM(miCOPY), "复制网址");
+	gtk_widget_add_accelerator(miCOPY, "activate", accel_group, 0x063, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
+	gtk_menu_shell_append(GTK_MENU_SHELL(menu), miCOPY);
+	gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+	
+	miDEL = gtk_image_menu_item_new_from_stock(GTK_STOCK_DELETE, NULL);
+	gtk_menu_item_set_label(GTK_MENU_ITEM(miDEL), "排除这个项目");
+	gtk_widget_add_accelerator(miDEL, "activate", accel_group, 0xffff, 0, GTK_ACCEL_VISIBLE);
+	gtk_menu_shell_append(GTK_MENU_SHELL(menu), miDEL);
+	
+	miCLEAR = gtk_image_menu_item_new_from_stock(GTK_STOCK_CLEAR, NULL);
+	gtk_menu_item_set_label(GTK_MENU_ITEM(miCLEAR), "清空列表");
+	gtk_widget_add_accelerator(miCLEAR, "activate", accel_group, 0xffff, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
+	gtk_menu_shell_append(GTK_MENU_SHELL(menu), miCLEAR);
 	
 	scrollLIST = gtk_scrolled_window_new(NULL, NULL);
 	//gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrollLIST), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 	gtk_widget_set_size_request(scrollLIST, -1, 200);
 	gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(scrollLIST), listFILES);
+	
+	labelAUTHOR = gtk_label_new("");
+	gtk_label_set_markup(GTK_LABEL(labelAUTHOR), "<small><a href=\"https://github.com/caiguanhao/cBatchDownload\">cBatchDownload</a> by "\
+	"<a href=\"http://www.caiguanhao.com/\">caiguanhao</a></small>");
+	gtk_misc_set_alignment(GTK_MISC(labelAUTHOR),0.0,0.5);
 	
 	gtk_table_attach(GTK_TABLE(table), labelSRC, 0, 1, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	gtk_table_attach(GTK_TABLE(table), entrySRC, 1, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
@@ -506,15 +693,28 @@ int main (int argc, char *argv[]) {
 	gtk_table_attach(GTK_TABLE(table), labelREALSTATUS, 1, 2, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	gtk_table_attach(GTK_TABLE(table), buttonFIND, 2, 3, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	gtk_table_attach(GTK_TABLE(table), buttonBATCH, 3, 4, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), buttonSTOP, 3, 4, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	
 	gtk_table_attach(GTK_TABLE(table), scrollLIST, 0, 4, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 5);
+	
+	gtk_table_attach(GTK_TABLE(table), labelAUTHOR, 0, 4, 5, 6, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 0);
 
 	g_signal_connect(G_OBJECT(buttonBROWSE), "clicked", G_CALLBACK(browse), argv[0]);
 	g_signal_connect(G_OBJECT(buttonFIND), "clicked", G_CALLBACK(find), (gpointer) window);
 	g_signal_connect(G_OBJECT(buttonBATCH), "clicked", G_CALLBACK(download_click), (gpointer) window);
+	g_signal_connect(G_OBJECT(buttonSTOP), "clicked", G_CALLBACK(stop_download), (gpointer) window);
 	g_signal_connect(G_OBJECT(checkREGEX2_ENABLED), "clicked", G_CALLBACK(chkREGEX2), NULL);
-	g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
-
+	g_signal_connect(G_OBJECT(miVIEW), "activate", G_CALLBACK(openurl), NULL);
+	g_signal_connect(G_OBJECT(miCOPY), "activate", G_CALLBACK(copyurl), NULL);
+	g_signal_connect(G_OBJECT(miDEL), "activate", G_CALLBACK(deleteurl), NULL);
+	g_signal_connect(G_OBJECT(miCLEAR), "activate", G_CALLBACK(clearlist), NULL);
+	g_signal_connect(G_OBJECT(listFILES), "button-press-event", G_CALLBACK(list_popup), NULL);
+	g_signal_connect(G_OBJECT(listFILES), "row-activated", G_CALLBACK(openurl), NULL);
+	g_signal_connect(G_OBJECT(window), "destroy", G_CALLBACK(gtk_main_quit), NULL);
+	g_signal_connect(G_OBJECT(window), "key-press-event", G_CALLBACK(key_press), window);
+	
+	gtk_widget_grab_focus(buttonFIND);
+	gtk_widget_show_all(menu);
 	gtk_widget_show_all(window);
 
 	gtk_main();
