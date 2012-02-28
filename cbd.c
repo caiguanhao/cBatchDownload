@@ -13,6 +13,8 @@
 int items_found = 0, items_to_dl = 0;
 int dldone=-1;
 int dl_simul = 5;
+int sL_height=200;
+int max_top = 0;
 gboolean dling = FALSE;
 
 GtkWidget *window;
@@ -28,6 +30,10 @@ GtkWidget *gFCD;
 GtkWidget *menu, *miVIEW, *miCOPY, *miDEL, *miCLEAR;
 
 GtkAccelGroup *accel_group;
+struct ADJ {
+	GtkAdjustment *H;
+	GtkAdjustment *V;
+} sL_adjustment;
 
 pthread_t thread_download;
 
@@ -37,6 +43,11 @@ enum {
 	PROGRESS_TEXT,
 	PROGRESS,
 	N_COLUMNS
+};
+
+struct pro {
+	gchar *pathstring;
+	int index;
 };
 
 static void init_list (GtkWidget *list) {
@@ -239,7 +250,6 @@ void find (GtkWidget *widget, gpointer window) {
 						}
 						file = NULL;
 						items_found+=1;
-						
 					}
 					offset = ovector[1];
 				}
@@ -251,6 +261,7 @@ void find (GtkWidget *widget, gpointer window) {
 	}
 	pFILE = NULL;
 	update_status();
+	gtk_scrolled_window_set_vadjustment(GTK_SCROLLED_WINDOW(scrollLIST), NULL);
 	gtk_widget_set_sensitive(buttonBATCH, items_to_dl);
 }
 
@@ -280,10 +291,19 @@ void batchsensitive (gboolean sensitive) {
 	if(sensitive)chkREGEX2();
 }
 
-struct pro {
-	gchar *pathstring;
-	int index;
-};
+void scrollTo (GtkWidget *sL, int top) {
+	GtkAdjustment *adjustment;
+	adjustment = (GtkAdjustment *)gtk_adjustment_new(top, sL_adjustment.V->lower, sL_adjustment.V->upper, sL_adjustment.V->step_increment, sL_adjustment.V->page_increment, sL_adjustment.V->page_size);
+	gtk_scrolled_window_set_vadjustment(GTK_SCROLLED_WINDOW(sL), adjustment);
+
+}
+
+void scrollTo_H (GtkWidget *sL, int left) {
+	GtkAdjustment *adjustment;
+	adjustment = (GtkAdjustment *)gtk_adjustment_new(left, sL_adjustment.H->lower, sL_adjustment.H->upper, sL_adjustment.H->step_increment, sL_adjustment.H->page_increment, sL_adjustment.H->page_size);
+	gtk_scrolled_window_set_hadjustment(GTK_SCROLLED_WINDOW(sL), adjustment);
+
+}
 
 static int progress (void *p, double dltotal, double dlnow, double ultotal, double ulnow) {
 	gdk_threads_enter();
@@ -299,6 +319,20 @@ static int progress (void *p, double dltotal, double dlnow, double ultotal, doub
 	gint *progcc;
 	gtk_tree_model_get(model, &iter, PROGRESS, &progcc, -1);
 	gtk_list_store_set(GTK_LIST_STORE(model), &iter, PROGRESS_TEXT, pt, PROGRESS, done, -1);
+	if ((int)progcc==(int)0 && done!=0) {
+		GtkTreePath *path;
+		path = gtk_tree_model_get_path(model, &iter);
+		GdkRectangle GR;
+		gtk_tree_view_get_cell_area(GTK_TREE_VIEW(listFILES), path, NULL, &GR);
+		gint top = GR.y + GR.height - sL_height;
+		if(top>(gint)sL_adjustment.V->upper){
+			top=(gint)sL_adjustment.V->upper;
+		}
+		if(top>max_top){
+			max_top=top;
+			scrollTo(scrollLIST, max_top);
+		}
+	}
 	if ((int)progcc!=(int)100 && done==100) {
 		items_to_dl-=1;
 		update_status();
@@ -363,12 +397,10 @@ void *download (void *p) {
 			useindex=-1;
 			
 			free(urlss);
-			free(location);
-			free(filename);
 		}
-		
 		valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(model), &iter);
 	}
+	
 	if (i>0) {
 		dling = TRUE;
 		curl_multi_perform(multi_handle, &still_running);
@@ -534,9 +566,7 @@ void openurl() {
 			gchar *argv[] = {"xdg-open", (gchar*) url, NULL};
 			g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error);
 		#endif
-		free(filename);
 		free(url);
-		free(location);
 	}
 }
 
@@ -554,21 +584,75 @@ void copyurl () {
 		strcat(urlss,filename);
 		gtk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(listFILES), GDK_SELECTION_CLIPBOARD), urlss, -1);
 		free(urlss);
-		free(filename);
-		free(location);
 	}
+}
+
+void init_popup_list () {
+	gtk_widget_set_sensitive(miVIEW, items_found);
+	gtk_widget_set_sensitive(miCOPY, items_found);
+	gtk_widget_set_sensitive(miDEL, items_found);
+	gtk_widget_set_sensitive(miCLEAR, items_found);		
 }
 
 gboolean list_popup (void *p, GdkEventButton *event, gpointer userdata) {
 	if (event->type == GDK_BUTTON_PRESS  &&  event->button == 3) {
-		gtk_widget_set_sensitive(miVIEW, items_found);
-		gtk_widget_set_sensitive(miCOPY, items_found);
-		gtk_widget_set_sensitive(miDEL, items_found);
-		gtk_widget_set_sensitive(miCLEAR, items_found);		
+		init_popup_list();
 		g_object_ref((gpointer)menu);
 		gtk_menu_popup(GTK_MENU(menu), NULL, NULL, NULL, NULL, 3, GDK_CURRENT_TIME);
 	}
 	return FALSE;
+}
+
+void menu_position_func (GtkMenu *menu, int *x, int *y, gboolean *push_in, gpointer data) {
+	gdk_window_get_position(window->window, x, y);
+	*x += scrollLIST->allocation.x;
+	*y += scrollLIST->allocation.y;
+}
+
+void listkeypress (GtkWindow *win, GdkEventKey *event, gpointer user_data) {
+	GtkTreePath *path;
+	GtkTreeIter iter;
+	GdkRectangle GR;
+	gtk_tree_view_get_cursor(GTK_TREE_VIEW(listFILES), &path, NULL);
+	struct ADJ adjustment={
+		gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(scrollLIST)),
+		gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(scrollLIST))
+	};
+	gint setval;
+	switch (event->keyval) {
+		case 0xff51: //LEFT
+			gtk_tree_view_get_cell_area(GTK_TREE_VIEW(listFILES), path, NULL, &GR);
+			setval = adjustment.H->value - scrollLIST->allocation.width * 2 / 3;
+			if (setval < 0) setval=0;
+			scrollTo_H(scrollLIST, setval);
+			break;
+		case 0xff52: //UP
+			if (gtk_tree_path_prev(path)) {
+				gtk_tree_view_set_cursor_on_cell(GTK_TREE_VIEW(listFILES), path, NULL, NULL, FALSE);
+				gtk_tree_view_get_cell_area(GTK_TREE_VIEW(listFILES), path, NULL, &GR);
+				gint setval = GR.y;
+				if (setval < adjustment.V->value) scrollTo(scrollLIST, setval);
+			}
+			break;
+		case 0xff53: //RIGHT
+			gtk_tree_view_get_cell_area(GTK_TREE_VIEW(listFILES), path, NULL, &GR);
+			gint setval = adjustment.H->value + scrollLIST->allocation.width * 2 / 3;
+			if (setval < adjustment.H->upper) scrollTo_H(scrollLIST, setval);
+			break;
+		case 0xff54: //DOWN
+			gtk_tree_path_next(path);
+			if (gtk_tree_model_get_iter(gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES)), &iter, path)) {
+				gtk_tree_view_set_cursor_on_cell(GTK_TREE_VIEW(listFILES), path, NULL, NULL, FALSE);
+				gtk_tree_view_get_cell_area(GTK_TREE_VIEW(listFILES), path, NULL, &GR);
+				gint setval = GR.y + GR.height - sL_height;
+				if (setval > adjustment.V->value) scrollTo(scrollLIST, setval);
+			}
+			break;
+		case 0xff67: //MENU KEY
+			init_popup_list();
+			g_object_ref((gpointer)menu);
+			gtk_menu_popup(GTK_MENU(menu), NULL, NULL, (GtkMenuPositionFunc) menu_position_func, NULL, 0, GDK_CURRENT_TIME);
+	}
 }
 
 int main (int argc, char *argv[]) {
@@ -667,9 +751,11 @@ int main (int argc, char *argv[]) {
 	gtk_menu_shell_append(GTK_MENU_SHELL(menu), miCLEAR);
 	
 	scrollLIST = gtk_scrolled_window_new(NULL, NULL);
-	//gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrollLIST), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-	gtk_widget_set_size_request(scrollLIST, -1, 200);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrollLIST), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+	gtk_widget_set_size_request(scrollLIST, -1, sL_height);
 	gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(scrollLIST), listFILES);
+	sL_adjustment.H=gtk_tree_view_get_hadjustment(GTK_TREE_VIEW(listFILES));
+	sL_adjustment.V=gtk_tree_view_get_vadjustment(GTK_TREE_VIEW(listFILES));
 	
 	labelAUTHOR = gtk_label_new("");
 	gtk_label_set_markup(GTK_LABEL(labelAUTHOR), "<small><a href=\"https://github.com/caiguanhao/cBatchDownload\">cBatchDownload</a> by "\
@@ -710,6 +796,7 @@ int main (int argc, char *argv[]) {
 	g_signal_connect(G_OBJECT(miCLEAR), "activate", G_CALLBACK(clearlist), NULL);
 	g_signal_connect(G_OBJECT(listFILES), "button-press-event", G_CALLBACK(list_popup), NULL);
 	g_signal_connect(G_OBJECT(listFILES), "row-activated", G_CALLBACK(openurl), NULL);
+	g_signal_connect(G_OBJECT(listFILES), "key-press-event", G_CALLBACK(listkeypress), window);
 	g_signal_connect(G_OBJECT(window), "destroy", G_CALLBACK(gtk_main_quit), NULL);
 	g_signal_connect(G_OBJECT(window), "key-press-event", G_CALLBACK(key_press), window);
 	
