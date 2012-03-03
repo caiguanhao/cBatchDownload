@@ -1,28 +1,30 @@
 #include <stdio.h>
 #include <string.h>
-#include <gtk/gtk.h>
-#include <curl/curl.h>
 #include <stdlib.h>
-#include <pcre.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <gtk/gtk.h>
+#include <curl/curl.h>
+#include <pcre.h>
 #ifdef _WIN32
 #include <gdk/gdkwin32.h>
 #endif
 
 int items_found = 0, items_to_dl = 0;
-int dldone=-1;
+int dldone = -1;
 int dl_simul = 5;
-int sL_height=200;
+int sL_height = 200;
 int max_top = 0;
+char *location2save = "downloads/";
 gboolean dling = FALSE;
 
-GtkWidget *window;
-GtkWidget *table;
+GtkWidget *window,*windowDF;
+GtkWidget *table,*tableDF;
 
 GtkWidget *labelSRC,*labelFIND,*labelFILTER,*labelSTATUS,*labelREALSTATUS,*labelAUTHOR;
-GtkWidget *entrySRC,*entryREGEX,*entryREGEX2;
-GtkWidget *buttonBROWSE,*buttonDL,*buttonFIND,*buttonBATCH,*buttonSTOP;
+GtkWidget *entrySRC,*entryREGEX,*entryREGEX2,*entryDFSRC;
+GtkWidget *buttonBROWSE,*buttonDL,*buttonFIND,*buttonBATCH,*buttonSTOP,*buttonDFGET;
 GtkWidget *checkREGEX2_ENABLED, *checkREGEX2_REVERSE;
 
 GtkWidget *scrollLIST,*listFILES;
@@ -30,6 +32,7 @@ GtkWidget *gFCD;
 GtkWidget *menu, *miVIEW, *miCOPY, *miDEL, *miCLEAR;
 
 GtkAccelGroup *accel_group;
+
 struct ADJ {
 	GtkAdjustment *H;
 	GtkAdjustment *V;
@@ -150,8 +153,15 @@ char *get_file_name (char *location) {
 
 char *location_to_save (char *path) {
 	char *lts=malloc((strlen(path)+1)*sizeof(char));
-	sprintf(lts,"%s%s","downloads/",get_file_name(path));
+	sprintf(lts,"%s%s",location2save,get_file_name(path));
 	return lts;
+}
+
+void create_folders(char *path) {
+	struct stat st = {0};
+	if (stat(get_path(path), &st) == -1) {
+		mkdir(get_path(path), 0700);
+	}
 }
 
 void browse (GtkWidget *widget, char *dir) {
@@ -293,14 +303,18 @@ void batchsensitive (gboolean sensitive) {
 
 void scrollTo (GtkWidget *sL, int top) {
 	GtkAdjustment *adjustment;
-	adjustment = (GtkAdjustment *)gtk_adjustment_new(top, sL_adjustment.V->lower, sL_adjustment.V->upper, sL_adjustment.V->step_increment, sL_adjustment.V->page_increment, sL_adjustment.V->page_size);
+	adjustment = (GtkAdjustment *)gtk_adjustment_new(top, sL_adjustment.V->lower, 
+	sL_adjustment.V->upper, sL_adjustment.V->step_increment, 
+	sL_adjustment.V->page_increment, sL_adjustment.V->page_size);
 	gtk_scrolled_window_set_vadjustment(GTK_SCROLLED_WINDOW(sL), adjustment);
 
 }
 
 void scrollTo_H (GtkWidget *sL, int left) {
 	GtkAdjustment *adjustment;
-	adjustment = (GtkAdjustment *)gtk_adjustment_new(left, sL_adjustment.H->lower, sL_adjustment.H->upper, sL_adjustment.H->step_increment, sL_adjustment.H->page_increment, sL_adjustment.H->page_size);
+	adjustment = (GtkAdjustment *)gtk_adjustment_new(left, sL_adjustment.H->lower, 
+	sL_adjustment.H->upper, sL_adjustment.H->step_increment, 
+	sL_adjustment.H->page_increment, sL_adjustment.H->page_size);
 	gtk_scrolled_window_set_hadjustment(GTK_SCROLLED_WINDOW(sL), adjustment);
 
 }
@@ -361,6 +375,8 @@ void *download (void *p) {
 	
 	int i=0;
 	int useindex=-1;
+	
+	create_folders(location2save);
 	
 	start:
 	
@@ -655,6 +671,69 @@ void listkeypress (GtkWindow *win, GdkEventKey *event, gpointer user_data) {
 	}
 }
 
+void *getfilecontents (void *p) {
+	CURL *http_handle;
+	http_handle = curl_easy_init();
+	
+	FILE *fp;
+	fp=fopen("resources/temp","wb");
+	create_folders("resources/");
+	curl_easy_setopt(http_handle, CURLOPT_URL, gtk_entry_get_text(GTK_ENTRY(entryDFSRC)));
+	curl_easy_setopt(http_handle, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+	curl_easy_setopt(http_handle, CURLOPT_WRITEFUNCTION, write_data);
+	curl_easy_setopt(http_handle, CURLOPT_WRITEDATA, fp);
+	curl_easy_setopt(http_handle, CURLOPT_PROXY, "127.0.0.1:8080");
+	curl_easy_setopt(http_handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5);
+	curl_easy_perform(http_handle);
+	curl_easy_cleanup(http_handle);
+	
+	fclose(fp);
+	
+	gtk_widget_set_sensitive(entryDFSRC, TRUE);
+	gtk_widget_set_sensitive(buttonDFGET, TRUE);
+	gtk_window_set_title(GTK_WINDOW(windowDF), "下载完成，来源已更改");
+	gtk_entry_set_text(GTK_ENTRY(entrySRC), "resources/temp");
+	pthread_exit(NULL);
+	return NULL;
+}
+
+void getfilecontents_click () {
+	gtk_widget_set_sensitive(entryDFSRC, FALSE);
+	gtk_widget_set_sensitive(buttonDFGET, FALSE);
+	gtk_window_set_title(GTK_WINDOW(windowDF), "正在获取内容...");
+	pthread_t threadx;
+	pthread_create(&threadx, NULL, getfilecontents, NULL);
+}
+
+void download_from () {
+	windowDF = gtk_dialog_new();
+	gtk_window_set_title(GTK_WINDOW(windowDF), "下载自");
+	gtk_window_set_transient_for(GTK_WINDOW(windowDF), GTK_WINDOW(window));
+	gtk_window_set_position(GTK_WINDOW(windowDF), GTK_WIN_POS_CENTER_ON_PARENT);
+	gtk_window_set_modal(GTK_WINDOW(windowDF), TRUE);
+	gtk_window_set_resizable(GTK_WINDOW(windowDF), FALSE);
+	gtk_container_set_border_width(GTK_CONTAINER(windowDF), 3);
+	
+	tableDF = gtk_table_new(1, 3, FALSE);
+	gtk_box_pack_start(GTK_BOX(GTK_DIALOG(windowDF)->vbox), tableDF, TRUE, TRUE, 0);
+	
+	entryDFSRC = gtk_entry_new();
+	gtk_entry_set_text(GTK_ENTRY(entryDFSRC), "http://fuckyeahkitties.tumblr.com/rss"); //FOR EXAMPLE
+	gtk_widget_set_size_request(entryDFSRC, 300, 30);
+	buttonDFGET = gtk_button_new_with_label("获取");
+	gtk_widget_set_size_request(buttonDFGET, 80, 30);
+	
+	gtk_table_attach(GTK_TABLE(tableDF), gtk_label_new("来源:"), 0, 1, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(tableDF), entryDFSRC, 1, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(tableDF), buttonDFGET, 2, 3, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	
+	g_signal_connect(G_OBJECT(buttonDFGET), "clicked", G_CALLBACK(getfilecontents_click), NULL);
+	
+	gtk_widget_show_all(windowDF);
+	gtk_dialog_run(GTK_DIALOG(windowDF));
+	gtk_widget_destroy(windowDF);
+}
+
 int main (int argc, char *argv[]) {
 	g_thread_init(NULL);
 	gdk_threads_init();
@@ -785,6 +864,7 @@ int main (int argc, char *argv[]) {
 	
 	gtk_table_attach(GTK_TABLE(table), labelAUTHOR, 0, 4, 5, 6, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 0);
 
+	g_signal_connect(G_OBJECT(buttonDL), "clicked", G_CALLBACK(download_from), NULL);
 	g_signal_connect(G_OBJECT(buttonBROWSE), "clicked", G_CALLBACK(browse), argv[0]);
 	g_signal_connect(G_OBJECT(buttonFIND), "clicked", G_CALLBACK(find), (gpointer) window);
 	g_signal_connect(G_OBJECT(buttonBATCH), "clicked", G_CALLBACK(download_click), (gpointer) window);
