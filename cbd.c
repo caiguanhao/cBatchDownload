@@ -165,13 +165,7 @@ void create_folders(char *path) {
 }
 
 void browse (GtkWidget *widget, char *dir) {
-	int i=0;
-	char c[1];
-	do {
-		sprintf(c,"%.*s",1,&dir[strlen(dir)-i]);
-		i++;
-	} while(strcmp(c,"/")!=0);
-	sprintf(dir,"%.*s",strlen(dir)-i+2,&dir[0]);
+	dir=get_path(dir);
 	gFCD = gtk_file_chooser_dialog_new("选择一个文件", GTK_WINDOW(window), GTK_FILE_CHOOSER_ACTION_OPEN, GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL, GTK_STOCK_OPEN, GTK_RESPONSE_ACCEPT, NULL);
 	if (gtk_dialog_run(GTK_DIALOG(gFCD))==GTK_RESPONSE_ACCEPT) {
 		char *filename, check[strlen(dir)];
@@ -180,8 +174,7 @@ void browse (GtkWidget *widget, char *dir) {
 		if(strcmp(check,dir)==0)sprintf(filename,"%s",&filename[strlen(dir)]);
 		gtk_entry_set_text(GTK_ENTRY(entrySRC), filename);
 	}
-	gtk_widget_destroy (gFCD);
-	
+	gtk_widget_destroy(gFCD);
 }
 
 void warn (gchar *title, gchar *content) {
@@ -199,7 +192,7 @@ void update_status() {
 	gtk_label_set_text(GTK_LABEL(labelREALSTATUS), status);
 }
 
-void clearlist() {
+void clearlist() { // reset the list
 	items_found=0;
 	items_to_dl=0;
 	gtk_list_store_clear(GTK_LIST_STORE(gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES))));
@@ -234,7 +227,7 @@ void find (GtkWidget *widget, gpointer window) {
 				}
 			}
 			
-			if ((re = pcre_compile (regex, 0, &error, &erroffset, 0))==NULL) {
+			if ((re = pcre_compile (regex, 0, &error, &erroffset, 0))==NULL) { // check whether the regex is valid
 				warn("错误","查找：错误的正则表达式。");
 				break;
 			} else {
@@ -247,9 +240,11 @@ void find (GtkWidget *widget, gpointer window) {
 						
 						if (filter_enabled>0) {
 							rc2 = pcre_exec(re2, 0, buffer, strlen(buffer), 0, 0, ovector2, sizeof(ovector2));
-							if (filter_enabled==1&&rc2<0) break;
-							if (filter_enabled==2&&rc2>=0) break;
+							if (filter_enabled==1&&rc2<0) break;  //filter: no matches
+							if (filter_enabled==2&&rc2>=0) break; //reverse-filter: no matches
 						}
+						
+						// check whether a file exists
 						FILE *file = fopen(location_to_save(buffer), "r");
 						if (file) {
 							fclose(file);
@@ -275,7 +270,7 @@ void find (GtkWidget *widget, gpointer window) {
 	gtk_widget_set_sensitive(buttonBATCH, items_to_dl);
 }
 
-size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream) {
+size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream) { // curl write function
 	return fwrite(ptr, size, nmemb, stream);
 }
 
@@ -301,7 +296,7 @@ void batchsensitive (gboolean sensitive) {
 	if(sensitive)chkREGEX2();
 }
 
-void scrollTo (GtkWidget *sL, int top) {
+void scrollTo (GtkWidget *sL, int top) { // vertical scroll
 	GtkAdjustment *adjustment;
 	adjustment = (GtkAdjustment *)gtk_adjustment_new(top, sL_adjustment.V->lower, 
 	sL_adjustment.V->upper, sL_adjustment.V->step_increment, 
@@ -310,7 +305,7 @@ void scrollTo (GtkWidget *sL, int top) {
 
 }
 
-void scrollTo_H (GtkWidget *sL, int left) {
+void scrollTo_H (GtkWidget *sL, int left) { // horizontal scroll
 	GtkAdjustment *adjustment;
 	adjustment = (GtkAdjustment *)gtk_adjustment_new(left, sL_adjustment.H->lower, 
 	sL_adjustment.H->upper, sL_adjustment.H->step_increment, 
@@ -333,7 +328,7 @@ static int progress (void *p, double dltotal, double dlnow, double ultotal, doub
 	gint *progcc;
 	gtk_tree_model_get(model, &iter, PROGRESS, &progcc, -1);
 	gtk_list_store_set(GTK_LIST_STORE(model), &iter, PROGRESS_TEXT, pt, PROGRESS, done, -1);
-	if ((int)progcc==(int)0 && done!=0) {
+	if ((int)progcc==(int)0 && done!=0) { // download just started, scroll the list to this item
 		GtkTreePath *path;
 		path = gtk_tree_model_get_path(model, &iter);
 		GdkRectangle GR;
@@ -347,7 +342,7 @@ static int progress (void *p, double dltotal, double dlnow, double ultotal, doub
 			scrollTo(scrollLIST, max_top);
 		}
 	}
-	if ((int)progcc!=(int)100 && done==100) {
+	if ((int)progcc!=(int)100 && done==100) { // download just completed, report download() to do cleanup
 		items_to_dl-=1;
 		update_status();
 		dldone=prog->index;
@@ -376,15 +371,15 @@ void *download (void *p) {
 	int i=0;
 	int useindex=-1;
 	
-	create_folders(location2save);
+	create_folders(location2save); // if download folder doesn't exist, then create one
 	
 	start:
 	
 	while (valid && (i<dl_simul || useindex>-1)) {
 		gint *progcc;
-		gtk_tree_model_get(model, &iter, PROGRESS, &progcc, -1);
+		gtk_tree_model_get(model, &iter, PROGRESS, &progcc, -1); // get progress
 		
-		if((int)progcc!=(int)100){
+		if((int)progcc!=(int)100){ // 100 means completed
 			if (useindex==-1) useindex=i;
 			
 			gchar *location, *filename;
@@ -414,7 +409,7 @@ void *download (void *p) {
 			
 			free(urlss);
 		}
-		valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(model), &iter);
+		valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(model), &iter); // next item in the list
 	}
 	
 	if (i>0) {
@@ -463,7 +458,7 @@ void *download (void *p) {
 			
 			if (!dling) break;
 			
-			if (still_running<i && dldone>-1) {
+			if (still_running<i && dldone>-1) { // complete a download and do cleanup
 				printf("完成第%d/%d个下载\n",dldone+1,dl_simul);
 				if (fp[dldone]) {
 					fclose(fp[dldone]);
@@ -478,7 +473,7 @@ void *download (void *p) {
 					useindex=dldone;
 					dldone=-1;
 					i-=1;
-					goto start;
+					goto start; // continue to download
 				} else {
 					dldone=-1;
 				}
@@ -515,9 +510,11 @@ void stop_download () {
 }
 
 gboolean key_press(GtkWindow *win, GdkEventKey *event, gpointer user_data) {
-	if (!GTK_IS_ENTRY(gtk_window_get_focus(GTK_WINDOW(win))) && event->keyval == 0xff1b ) { //ESC
+	if (!GTK_IS_ENTRY(gtk_window_get_focus(GTK_WINDOW(win))) //don't bind ESC button on entry widget
+		&& event->keyval == 0xff1b ) { //ESC
 		gtk_main_quit();
-	} else if (gtk_window_get_focus(GTK_WINDOW(win))) {
+	} else if (!GTK_IS_TREE_VIEW(gtk_window_get_focus(GTK_WINDOW(win)))) {
+		// key for entry widget, for the file list (tree view), it needs to return false to its func.
 		if (event->keyval == 0xffff || //DELETE
 		((event->state & GDK_CONTROL_MASK) && (
 			event->keyval == 0x06f || //CTRL+O
@@ -528,7 +525,7 @@ gboolean key_press(GtkWindow *win, GdkEventKey *event, gpointer user_data) {
 		return gtk_widget_event(gtk_window_get_focus(GTK_WINDOW(win)), (GdkEvent *)event);
 		}
 	}
-	return FALSE;
+	return FALSE; // return false to trigger another function
 }
 
 void deleteurl(GtkWindow *win, GdkEventKey *event, gpointer user_data) {
@@ -559,7 +556,7 @@ void deleteurl(GtkWindow *win, GdkEventKey *event, gpointer user_data) {
 	}
 }
 
-void openurl() {
+void openurl() { // opens selected link in default web browser
 	GtkTreeModel *model;
 	GtkTreeIter iter;
 	model = gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES));
@@ -586,7 +583,7 @@ void openurl() {
 	}
 }
 
-void copyurl () {
+void copyurl () { // copy selected link to clipboard
 	GtkTreeModel *model;
 	GtkTreeIter iter;
 	model = gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES));
@@ -620,8 +617,8 @@ gboolean list_popup (void *p, GdkEventButton *event, gpointer userdata) {
 }
 
 void menu_position_func (GtkMenu *menu, int *x, int *y, gboolean *push_in, gpointer data) {
-	gdk_window_get_position(window->window, x, y);
-	*x += scrollLIST->allocation.x;
+	gdk_window_get_position(window->window, x, y); //main window top-left
+	*x += scrollLIST->allocation.x; //scroll window top and left
 	*y += scrollLIST->allocation.y;
 }
 
@@ -657,6 +654,7 @@ void listkeypress (GtkWindow *win, GdkEventKey *event, gpointer user_data) {
 			break;
 		case 0xff54: //DOWN
 			gtk_tree_path_next(path);
+			// check whether next path is valid:
 			if (gtk_tree_model_get_iter(gtk_tree_view_get_model(GTK_TREE_VIEW(listFILES)), &iter, path)) {
 				gtk_tree_view_set_cursor_on_cell(GTK_TREE_VIEW(listFILES), path, NULL, NULL, FALSE);
 				gtk_tree_view_get_cell_area(GTK_TREE_VIEW(listFILES), path, NULL, &GR);
@@ -808,9 +806,12 @@ int main (int argc, char *argv[]) {
 	menu = gtk_menu_new();
 	
 	miVIEW = gtk_image_menu_item_new_from_stock(GTK_STOCK_NETWORK, NULL);
+	// set markup for the label in a menu item:
 	gtk_label_set_markup(GTK_LABEL(GTK_BIN(miVIEW)->child), "<b>在默认浏览器中查看</b>");
+	// for more accel_keys, see /usr/include/gtk-3.0/gdk/gdkkeysyms.h and gdkkeysyms-compat.h:
 	gtk_widget_add_accelerator(miVIEW, "activate", accel_group, 0x06f, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE);
 	gtk_menu_shell_append(GTK_MENU_SHELL(menu), miVIEW);
+	// add a separator:
 	gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
 	
 	miCOPY = gtk_image_menu_item_new_from_stock(GTK_STOCK_COPY, NULL);
@@ -874,9 +875,9 @@ int main (int argc, char *argv[]) {
 	g_signal_connect(G_OBJECT(miCOPY), "activate", G_CALLBACK(copyurl), NULL);
 	g_signal_connect(G_OBJECT(miDEL), "activate", G_CALLBACK(deleteurl), NULL);
 	g_signal_connect(G_OBJECT(miCLEAR), "activate", G_CALLBACK(clearlist), NULL);
-	g_signal_connect(G_OBJECT(listFILES), "button-press-event", G_CALLBACK(list_popup), NULL);
-	g_signal_connect(G_OBJECT(listFILES), "row-activated", G_CALLBACK(openurl), NULL);
-	g_signal_connect(G_OBJECT(listFILES), "key-press-event", G_CALLBACK(listkeypress), window);
+	g_signal_connect(G_OBJECT(listFILES), "button-press-event", G_CALLBACK(list_popup), NULL); //right-click
+	g_signal_connect(G_OBJECT(listFILES), "row-activated", G_CALLBACK(openurl), NULL); //double-click
+	g_signal_connect(G_OBJECT(listFILES), "key-press-event", G_CALLBACK(listkeypress), window); //navigate using keyboard
 	g_signal_connect(G_OBJECT(window), "destroy", G_CALLBACK(gtk_main_quit), NULL);
 	g_signal_connect(G_OBJECT(window), "key-press-event", G_CALLBACK(key_press), window);
 	
