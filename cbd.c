@@ -11,25 +11,65 @@
 #include <gdk/gdkwin32.h>
 #endif
 
+#define SETTINGS \
+	S(src) \
+	S(regex) \
+	S(regex2) \
+	S(regex2enabled) \
+	S(regex2reverse) \
+	S(dfsrc) \
+	S(proxy) \
+	S(proxyselected)
+
+typedef struct {
+#define S(name) gchar* name;
+SETTINGS
+#undef S
+} Settings;
+
+Settings conf = {
+	"resources/test", 
+	"(http\\:\\/\\/[a-zA-Z0-9\\-\\.]+\\.[a-zA-Z]{2,3}(?:\\/\\S*)?"\
+	"(?:[a-zA-Z0-9_])+\\.(?:jpg|jpeg|gif|png))",
+	"tumblr",
+	"0",
+	"0",
+	"http://fuckyeahkitties.tumblr.com/rss",
+	"127.0.0.1:1998",
+	"0"
+};
+Settings confcomments = {
+	"source / input file", 
+	"regular expression to find links in the file",
+	"regular expression to filter links in the file",
+	"enable(1) / disable(0) the filter",
+	"enable(1) / disable(0) the inverse match",
+	"the URL used in the download from dialog",
+	"proxy ip address and port number",
+	"proxy type: 0=none, 1=http, 2=socks4, 3=socks5"
+};
+
 int items_found = 0, items_to_dl = 0;
 int dldone = -1;
 int dl_simul = 5;
 int sL_height = 200;
 int max_top = 0;
+int selected_proxy_type=-1;
 char *location2save = "downloads/";
 gboolean dling = FALSE;
 
 GtkWidget *window,*windowDF;
 GtkWidget *table,*tableDF;
 
-GtkWidget *labelSRC,*labelFIND,*labelFILTER,*labelSTATUS,*labelREALSTATUS,*labelAUTHOR;
-GtkWidget *entrySRC,*entryREGEX,*entryREGEX2,*entryDFSRC;
+GtkWidget *labelSRC,*labelFIND,*labelFILTER,*labelSTATUS,*labelREALSTATUS,*labelAUTHOR,*labelSETPROXY;
+GtkWidget *entrySRC,*entryREGEX,*entryREGEX2,*entryDFSRC,*entryAD;
 GtkWidget *buttonBROWSE,*buttonDL,*buttonFIND,*buttonBATCH,*buttonSTOP,*buttonDFGET;
 GtkWidget *checkREGEX2_ENABLED, *checkREGEX2_REVERSE;
 
 GtkWidget *scrollLIST,*listFILES;
 GtkWidget *gFCD;
 GtkWidget *menu, *miVIEW, *miCOPY, *miDEL, *miCLEAR;
+GtkWidget *comboPT;
 
 GtkAccelGroup *accel_group;
 
@@ -52,6 +92,28 @@ struct pro {
 	gchar *pathstring;
 	int index;
 };
+
+void save_settings () {
+	conf.proxyselected = g_strdup_printf("%d", selected_proxy_type);
+	conf.src = g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(entrySRC)));
+	conf.regex = g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(entryREGEX)));
+	conf.regex2 = g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(entryREGEX2)));
+	conf.regex2enabled = g_strdup_printf("%d", gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(checkREGEX2_ENABLED)));
+	conf.regex2reverse = g_strdup_printf("%d", gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(checkREGEX2_REVERSE)));
+	
+	GKeyFile *keyfile;
+	keyfile = g_key_file_new();
+	#define S(name) g_key_file_set_string(keyfile, "Main", #name, conf.name); \
+		g_key_file_set_comment(keyfile, "Main", #name, confcomments.name, NULL);
+	SETTINGS
+	#undef S
+	g_file_set_contents("cbd.settings", g_key_file_to_data(keyfile, NULL, NULL), -1, NULL);
+}
+
+void main_quit () {
+	save_settings();
+	gtk_main_quit();
+}
 
 static void init_list (GtkWidget *list) {
 	GtkCellRenderer *renderer;
@@ -280,6 +342,11 @@ void chkREGEX2 () {
 	gtk_widget_set_sensitive(entryREGEX2, chked);
 }
 
+void chkPROXY () {
+	selected_proxy_type=gtk_combo_box_get_active(GTK_COMBO_BOX(comboPT));
+	gtk_widget_set_sensitive(entryAD, selected_proxy_type);
+}
+
 void batchsensitive (gboolean sensitive) {
 	gtk_widget_set_sensitive(entryREGEX, sensitive);
 	gtk_widget_set_sensitive(entryREGEX2, sensitive);
@@ -351,6 +418,23 @@ static int progress (void *p, double dltotal, double dlnow, double ultotal, doub
 	return 0;
 }
 
+void curl_set_proxy (CURL *the_handle) {
+	if (selected_proxy_type>0) {
+		curl_easy_setopt(the_handle, CURLOPT_PROXY, conf.proxy);
+		switch (selected_proxy_type) {
+			case 1:
+				curl_easy_setopt(the_handle, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+				break;
+			case 2:
+				curl_easy_setopt(the_handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS4);
+				break;
+			case 3:
+				curl_easy_setopt(the_handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5);
+				break;
+		}
+	}	
+}
+
 void *download (void *p) {
 	
 	CURLM *multi_handle;
@@ -403,6 +487,7 @@ void *download (void *p) {
 			curl_easy_setopt(http_handle[useindex], CURLOPT_NOPROGRESS, 0);
 			curl_easy_setopt(http_handle[useindex], CURLOPT_PROGRESSFUNCTION, progress);
 			curl_easy_setopt(http_handle[useindex], CURLOPT_PROGRESSDATA, &prog[useindex]);
+			curl_set_proxy(http_handle[useindex]);
 			curl_multi_add_handle(multi_handle, http_handle[useindex]);
 			i++;
 			useindex=-1;
@@ -512,7 +597,7 @@ void stop_download () {
 gboolean key_press(GtkWindow *win, GdkEventKey *event, gpointer user_data) {
 	if (!GTK_IS_ENTRY(gtk_window_get_focus(GTK_WINDOW(win))) //don't bind ESC button on entry widget
 		&& event->keyval == 0xff1b ) { //ESC
-		gtk_main_quit();
+		main_quit();
 	} else if (!GTK_IS_TREE_VIEW(gtk_window_get_focus(GTK_WINDOW(win)))) {
 		// key for entry widget, for the file list (tree view), it needs to return false to its func.
 		if (event->keyval == 0xffff || //DELETE
@@ -670,66 +755,168 @@ void listkeypress (GtkWindow *win, GdkEventKey *event, gpointer user_data) {
 }
 
 void *getfilecontents (void *p) {
+	sprintf(conf.dfsrc,"%s",gtk_entry_get_text(GTK_ENTRY(entryDFSRC)));
+	
 	CURL *http_handle;
 	http_handle = curl_easy_init();
 	
 	FILE *fp;
 	fp=fopen("resources/temp","wb");
 	create_folders("resources/");
-	curl_easy_setopt(http_handle, CURLOPT_URL, gtk_entry_get_text(GTK_ENTRY(entryDFSRC)));
-	curl_easy_setopt(http_handle, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+	curl_easy_setopt(http_handle, CURLOPT_URL, conf.dfsrc);
 	curl_easy_setopt(http_handle, CURLOPT_WRITEFUNCTION, write_data);
 	curl_easy_setopt(http_handle, CURLOPT_WRITEDATA, fp);
-	curl_easy_setopt(http_handle, CURLOPT_PROXY, "127.0.0.1:8080");
-	curl_easy_setopt(http_handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5);
+	curl_set_proxy(http_handle);
 	curl_easy_perform(http_handle);
 	curl_easy_cleanup(http_handle);
 	
 	fclose(fp);
 	
-	gtk_widget_set_sensitive(entryDFSRC, TRUE);
-	gtk_widget_set_sensitive(buttonDFGET, TRUE);
-	gtk_window_set_title(GTK_WINDOW(windowDF), "下载完成，来源已更改");
 	gtk_entry_set_text(GTK_ENTRY(entrySRC), "resources/temp");
+	gtk_dialog_response(GTK_DIALOG(windowDF), 1);
 	pthread_exit(NULL);
 	return NULL;
 }
 
-void getfilecontents_click () {
-	gtk_widget_set_sensitive(entryDFSRC, FALSE);
-	gtk_widget_set_sensitive(buttonDFGET, FALSE);
-	gtk_window_set_title(GTK_WINDOW(windowDF), "正在获取内容...");
-	pthread_t threadx;
-	pthread_create(&threadx, NULL, getfilecontents, NULL);
+void getfilecontents_click (GtkDialog *dialog, gint response_id, gpointer user_data) {
+	switch (response_id) {
+		case 0:
+			gtk_widget_set_sensitive(entryDFSRC, FALSE);
+			gtk_widget_set_sensitive(buttonDFGET, FALSE);
+			gtk_window_set_title(GTK_WINDOW(windowDF), "正在获取内容...");
+			pthread_t threadx;
+			pthread_create(&threadx, NULL, getfilecontents, NULL);
+			break;
+	}
 }
 
 void download_from () {
 	windowDF = gtk_dialog_new();
-	gtk_window_set_title(GTK_WINDOW(windowDF), "下载自");
+	char title[100];
+	strcpy(title,"从网络下载");
+	if (selected_proxy_type>0) {
+		strcat(title,"，使用");
+		switch(selected_proxy_type){
+			case 1: strcat(title,"HTTP");break;
+			case 2: strcat(title,"SOCKS4");break;
+			case 3: strcat(title,"SOCKS5");break;
+		}
+		strcat(title,"代理：");
+		strcat(title,conf.proxy);
+	} else {
+		strcat(title,"，不使用代理");
+	}
+	buttonDFGET = gtk_dialog_add_button(GTK_DIALOG(windowDF), "获取", 0);
+	gtk_window_set_title(GTK_WINDOW(windowDF), title);
 	gtk_window_set_transient_for(GTK_WINDOW(windowDF), GTK_WINDOW(window));
 	gtk_window_set_position(GTK_WINDOW(windowDF), GTK_WIN_POS_CENTER_ON_PARENT);
 	gtk_window_set_modal(GTK_WINDOW(windowDF), TRUE);
 	gtk_window_set_resizable(GTK_WINDOW(windowDF), FALSE);
 	gtk_container_set_border_width(GTK_CONTAINER(windowDF), 3);
 	
-	tableDF = gtk_table_new(1, 3, FALSE);
+	tableDF = gtk_table_new(1, 2, FALSE);
 	gtk_box_pack_start(GTK_BOX(GTK_DIALOG(windowDF)->vbox), tableDF, TRUE, TRUE, 0);
 	
 	entryDFSRC = gtk_entry_new();
-	gtk_entry_set_text(GTK_ENTRY(entryDFSRC), "http://fuckyeahkitties.tumblr.com/rss"); //FOR EXAMPLE
-	gtk_widget_set_size_request(entryDFSRC, 300, 30);
-	buttonDFGET = gtk_button_new_with_label("获取");
-	gtk_widget_set_size_request(buttonDFGET, 80, 30);
+	gtk_entry_set_text(GTK_ENTRY(entryDFSRC), conf.dfsrc);
+	gtk_widget_set_size_request(entryDFSRC, 400, 30);
 	
 	gtk_table_attach(GTK_TABLE(tableDF), gtk_label_new("来源:"), 0, 1, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	gtk_table_attach(GTK_TABLE(tableDF), entryDFSRC, 1, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
-	gtk_table_attach(GTK_TABLE(tableDF), buttonDFGET, 2, 3, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	
-	g_signal_connect(G_OBJECT(buttonDFGET), "clicked", G_CALLBACK(getfilecontents_click), NULL);
+	g_signal_connect(G_OBJECT(windowDF), "response", G_CALLBACK(getfilecontents_click), NULL);
 	
 	gtk_widget_show_all(windowDF);
-	gtk_dialog_run(GTK_DIALOG(windowDF));
+	run:
+	{
+		gint result = gtk_dialog_run(GTK_DIALOG(windowDF));
+		switch (result) {
+			case 0:
+				goto run;
+				break;
+		}
+	}
 	gtk_widget_destroy(windowDF);
+	
+}
+
+void update_proxy_status () {
+	char status[100];
+	strcpy(status,"<a href=\"cbd://set-proxy\">");
+	switch (selected_proxy_type) {
+		case -1:strcat(status,"设置代理</a>");break;
+		case 0:strcat(status,"不使用代理</a>");break;
+		case 1:strcat(status,"使用HTTP代理:");strcat(status,conf.proxy);strcat(status,"</a>");break;
+		case 2:strcat(status,"使用SOCKS4代理:");strcat(status,conf.proxy);strcat(status,"</a>");break;
+		case 3:strcat(status,"使用SOCKS5代理:");strcat(status,conf.proxy);strcat(status,"</a>");break;
+	}
+	gtk_label_set_markup(GTK_LABEL(labelSETPROXY), status);
+}
+
+void set_proxy_response (GtkDialog *dialog, gint response_id, gpointer user_data) {
+	const char *str = gtk_entry_get_text(GTK_ENTRY(entryAD));
+	sprintf(conf.proxy,"%s",str);
+	save_settings();
+	switch (response_id) {
+		case 0: {
+			if (selected_proxy_type>0) {
+				const char *error;
+				int erroffset;
+				if (pcre_exec(pcre_compile("^(([2]([0-4][0-9]|[5][0-5])|"
+				"[0-1]?[0-9]?[0-9])[.]){3}(([2]([0-4][0-9]|[5][0-5])|"
+				"[0-1]?[0-9]?[0-9])):[0-9]{1,5}$", 0, &error, &erroffset, 0)
+				, 0, str, strlen(str), 0, 0, NULL, 0)<0) {
+					warn("错误","错误的代理地址（示例：127.0.0.1:8080）。无法启用代理。");
+					selected_proxy_type=0;
+				}
+			}
+			update_proxy_status();
+			break;
+		}
+	}
+}
+
+gboolean set_proxy (GtkLabel *label, gchar *uri, gpointer user_data) {
+	if (strcmp(uri,"cbd://set-proxy")==0) {
+		GtkWidget *windowSP;
+		windowSP = gtk_dialog_new();
+		gtk_dialog_add_button(GTK_DIALOG(windowSP), "保存并关闭", 0);
+		gtk_window_set_title(GTK_WINDOW(windowSP), "设置代理");
+		gtk_window_set_transient_for(GTK_WINDOW(windowSP), GTK_WINDOW(window));
+		gtk_window_set_position(GTK_WINDOW(windowSP), GTK_WIN_POS_CENTER_ON_PARENT);
+		gtk_window_set_modal(GTK_WINDOW(windowSP), TRUE);
+		gtk_window_set_resizable(GTK_WINDOW(windowSP), FALSE);
+		gtk_container_set_border_width(GTK_CONTAINER(windowSP), 3);
+		
+		GtkWidget *tableSP = gtk_table_new(1, 2, FALSE);
+		gtk_box_pack_start(GTK_BOX(GTK_DIALOG(windowSP)->vbox), tableSP, TRUE, TRUE, 0);
+		
+		entryAD = gtk_entry_new();
+		gtk_widget_set_size_request(entryAD, 300, 30);
+		gtk_entry_set_text(GTK_ENTRY(entryAD), conf.proxy);
+		gtk_widget_set_sensitive(entryAD, FALSE);
+		
+		comboPT = gtk_combo_box_new_text();
+		gtk_combo_box_append_text(GTK_COMBO_BOX(comboPT), "不使用");
+		gtk_combo_box_append_text(GTK_COMBO_BOX(comboPT), "HTTP");
+		gtk_combo_box_append_text(GTK_COMBO_BOX(comboPT), "SOCKS4");
+		gtk_combo_box_append_text(GTK_COMBO_BOX(comboPT), "SOCKS5");
+		
+		gtk_combo_box_set_active(GTK_COMBO_BOX(comboPT), selected_proxy_type);
+		chkPROXY(entryAD);
+		
+		gtk_table_attach(GTK_TABLE(tableSP), comboPT, 0, 1, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 8);
+		gtk_table_attach(GTK_TABLE(tableSP), entryAD, 1, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 8);
+		
+		g_signal_connect(G_OBJECT(windowSP), "response", G_CALLBACK(set_proxy_response), NULL);
+		g_signal_connect(G_OBJECT(comboPT), "changed", G_CALLBACK(chkPROXY), NULL);
+		
+		gtk_widget_show_all(windowSP);
+		gtk_dialog_run(GTK_DIALOG(windowSP));
+		gtk_widget_destroy(windowSP);
+		return TRUE;
+	}
+	return FALSE;
 }
 
 int main (int argc, char *argv[]) {
@@ -737,12 +924,30 @@ int main (int argc, char *argv[]) {
 	gdk_threads_init();
 	gdk_threads_enter();
 	gtk_init(&argc, &argv);
-
+	
+	GKeyFile *keyfile;
+	keyfile = g_key_file_new();
+	
+	if (!g_key_file_load_from_file(keyfile, "cbd.settings", G_KEY_FILE_KEEP_COMMENTS, NULL)) {
+		#define S(name) g_key_file_set_string(keyfile, "Main", #name, conf.name); \
+			g_key_file_set_comment(keyfile, "Main", #name, confcomments.name, NULL);
+		SETTINGS
+		#undef S
+		g_file_set_contents("cbd.settings", g_key_file_to_data(keyfile, NULL, NULL), -1, NULL);
+	} else {
+		char *ss;
+		#define S(name) \
+			ss=g_key_file_get_string(keyfile, "Main", #name, NULL); \
+			if(ss)conf.name=ss;
+		SETTINGS
+		#undef S
+	}
+	
 	window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	
 	table = gtk_table_new(6, 4, FALSE);
 	gtk_container_add(GTK_CONTAINER(window), table);
-
+	
 	gtk_window_set_title(GTK_WINDOW(window), "cBatchDownload");
 	gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
 	gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
@@ -750,7 +955,7 @@ int main (int argc, char *argv[]) {
 	gtk_container_set_border_width(GTK_CONTAINER(window), 10);
 	GError *err = NULL;
 	gtk_window_set_icon_from_file(GTK_WINDOW(window), "resources/download.png", &err);
-
+	
 	labelSRC = gtk_label_new("来源:");
 	labelFIND = gtk_label_new("查找:");
 	labelFILTER = gtk_label_new("筛选:");
@@ -762,7 +967,7 @@ int main (int argc, char *argv[]) {
 	if (argv[1]) {
 		gtk_entry_set_text(GTK_ENTRY(entrySRC), argv[1]);
 	} else {
-		gtk_entry_set_text(GTK_ENTRY(entrySRC), "resources/test");
+		gtk_entry_set_text(GTK_ENTRY(entrySRC), conf.src);
 	}
 	
 	gtk_widget_set_size_request(entrySRC, 300, 30);
@@ -774,16 +979,21 @@ int main (int argc, char *argv[]) {
 	gtk_widget_set_size_request(buttonDL, 80, 30);
 	
 	entryREGEX = gtk_entry_new();
-	gtk_entry_set_text(GTK_ENTRY(entryREGEX), "(http\\:\\/\\/[a-zA-Z0-9\\-\\.]+\\.[a-zA-Z]{2,3}(?:\\/\\S*)?(?:[a-zA-Z0-9_])+\\.(?:jpg|jpeg|gif|png))");
+	gtk_entry_set_text(GTK_ENTRY(entryREGEX), conf.regex);
 	
 	checkREGEX2_ENABLED = gtk_check_button_new_with_label("启用筛选");
-	//gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(checkREGEX2_ENABLED), TRUE);
 	checkREGEX2_REVERSE = gtk_check_button_new_with_label("反筛选");
 	gtk_widget_set_sensitive(checkREGEX2_REVERSE, FALSE);
 	entryREGEX2 = gtk_entry_new();
-	gtk_entry_set_text(GTK_ENTRY(entryREGEX2), "tumblr");
+	gtk_entry_set_text(GTK_ENTRY(entryREGEX2), conf.regex2);
 	gtk_widget_set_size_request(entryREGEX2, 100, 30);
 	gtk_widget_set_sensitive(entryREGEX2, FALSE);
+	if (strcmp(conf.regex2enabled,"1")==0) {
+		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(checkREGEX2_ENABLED), TRUE);
+		chkREGEX2();
+	}
+	if (strcmp(conf.regex2reverse,"1")==0) 
+		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(checkREGEX2_REVERSE), TRUE);
 	
 	buttonFIND = gtk_button_new_with_label("查找");
 	gtk_widget_set_size_request(buttonFIND, 80, 30);
@@ -842,6 +1052,30 @@ int main (int argc, char *argv[]) {
 	"<a href=\"http://www.caiguanhao.com/\">caiguanhao</a></small>");
 	gtk_misc_set_alignment(GTK_MISC(labelAUTHOR),0.0,0.5);
 	
+	labelSETPROXY = gtk_label_new("");
+	gtk_label_set_track_visited_links(GTK_LABEL(labelSETPROXY), FALSE);
+	gtk_misc_set_alignment(GTK_MISC(labelSETPROXY),1.0,0.5);
+	if (selected_proxy_type==-1) {
+		selected_proxy_type=0;
+		if(strcmp(conf.proxyselected,"1")==0)selected_proxy_type=1;
+		if(strcmp(conf.proxyselected,"2")==0)selected_proxy_type=2;
+		if(strcmp(conf.proxyselected,"3")==0)selected_proxy_type=3;
+	}
+	const char *error;
+	int erroffset;
+	if (pcre_exec(pcre_compile("^(([2]([0-4][0-9]|[5][0-5])|"
+	"[0-1]?[0-9]?[0-9])[.]){3}(([2]([0-4][0-9]|[5][0-5])|"
+	"[0-1]?[0-9]?[0-9])):[0-9]{1,5}$", 0, &error, &erroffset, 0)
+	, 0, conf.proxy, strlen(conf.proxy), 0, 0, NULL, 0)<0) {
+		selected_proxy_type=0;
+	}
+	update_proxy_status();
+	
+	GtkWidget *hbox;
+	hbox = gtk_hbox_new(TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(hbox), labelAUTHOR, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(hbox), labelSETPROXY, TRUE, TRUE, 0);
+	
 	gtk_table_attach(GTK_TABLE(table), labelSRC, 0, 1, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	gtk_table_attach(GTK_TABLE(table), entrySRC, 1, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	gtk_table_attach(GTK_TABLE(table), buttonBROWSE, 2, 3, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
@@ -863,7 +1097,8 @@ int main (int argc, char *argv[]) {
 	
 	gtk_table_attach(GTK_TABLE(table), scrollLIST, 0, 4, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 5);
 	
-	gtk_table_attach(GTK_TABLE(table), labelAUTHOR, 0, 4, 5, 6, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 0);
+	gtk_table_attach(GTK_TABLE(table), hbox, 0, 4, 5, 6, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 0);
+	//gtk_table_attach(GTK_TABLE(table), , 2, 4, 5, 6, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 0);
 
 	g_signal_connect(G_OBJECT(buttonDL), "clicked", G_CALLBACK(download_from), NULL);
 	g_signal_connect(G_OBJECT(buttonBROWSE), "clicked", G_CALLBACK(browse), argv[0]);
@@ -878,8 +1113,9 @@ int main (int argc, char *argv[]) {
 	g_signal_connect(G_OBJECT(listFILES), "button-press-event", G_CALLBACK(list_popup), NULL); //right-click
 	g_signal_connect(G_OBJECT(listFILES), "row-activated", G_CALLBACK(openurl), NULL); //double-click
 	g_signal_connect(G_OBJECT(listFILES), "key-press-event", G_CALLBACK(listkeypress), window); //navigate using keyboard
-	g_signal_connect(G_OBJECT(window), "destroy", G_CALLBACK(gtk_main_quit), NULL);
+	g_signal_connect(G_OBJECT(window), "destroy", G_CALLBACK(main_quit), NULL);
 	g_signal_connect(G_OBJECT(window), "key-press-event", G_CALLBACK(key_press), window);
+	g_signal_connect(G_OBJECT(labelSETPROXY), "activate-link", G_CALLBACK(set_proxy), NULL);
 	
 	gtk_widget_grab_focus(buttonFIND);
 	gtk_widget_show_all(menu);
